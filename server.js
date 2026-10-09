@@ -40,6 +40,12 @@ wss.on('connection', (ws, req) => {
     if (ws.tokens < 1) return; ws.tokens--;                       // rate limit ~25 msgs/s
     let m; try { m = JSON.parse(data); } catch { return; }
     if (m.t === 'p') { const p = clean(m.p); if (!p) return; state.set(ws.id, p); broadcast({ t: 's', id: ws.id, p }, ws); return; }
+    if (m.t === 'chat') {
+      const now2 = Date.now(); if (now2 - (ws.lastChat || 0) < 700) return; ws.lastChat = now2;
+      const text = String(m.text || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 120); if (!text) return;
+      const n = (state.get(ws.id) || {}).n || 'Player';
+      broadcast({ t: 'chat', id: ws.id, n, text }); return;
+    }
     if (m.t === 'shop') { if (![m.x, m.y, m.z].every(isNum)) return; shop = { x: m.x, y: m.y, z: m.z }; broadcast({ t: 'shop', x: m.x, y: m.y, z: m.z }); return; }
     if (m.t === 'ispawn') {
       if (!['stick', 'flashlight'].includes(m.type) || ![m.x, m.y, m.z, m.yaw].every(isNum)) return;
