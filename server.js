@@ -12,6 +12,7 @@ const state = new Map();           // id -> last valid presence
 const ipCount = new Map();
 const items = new Map();           // id -> {id,type,x,y,z,yaw,m,h,on}
 let itemSeq = 1;
+let shop = null;                   // {x,y,z} set by any player pressing B
 const MAX_ITEMS = 120;
 
 const num = v => typeof v === 'number' && isFinite(v) && Math.abs(v) < 1e6 ? v : null;
@@ -32,13 +33,14 @@ wss.on('connection', (ws, req) => {
   if (wss.clients.size > MAX_CLIENTS || n > MAX_PER_IP) { ws.close(1013); return; }
   ipCount.set(ip, n);
   ws.id = crypto.randomBytes(6).toString('hex'); ws.alive = true; ws.tokens = 40; ws.lastRefill = Date.now();
-  send(ws, { t: 'hello', id: ws.id, peers: [...state].map(([id, p]) => ({ id, p })), items: [...items.values()].map(itemOut) });
+  send(ws, { t: 'hello', id: ws.id, peers: [...state].map(([id, p]) => ({ id, p })), items: [...items.values()].map(itemOut), shop });
   ws.on('pong', () => ws.alive = true);
   ws.on('message', data => {
     const now = Date.now(); ws.tokens = Math.min(40, ws.tokens + (now - ws.lastRefill) / 1000 * 25); ws.lastRefill = now;
     if (ws.tokens < 1) return; ws.tokens--;                       // rate limit ~25 msgs/s
     let m; try { m = JSON.parse(data); } catch { return; }
     if (m.t === 'p') { const p = clean(m.p); if (!p) return; state.set(ws.id, p); broadcast({ t: 's', id: ws.id, p }, ws); return; }
+    if (m.t === 'shop') { if (![m.x, m.y, m.z].every(isNum)) return; shop = { x: m.x, y: m.y, z: m.z }; broadcast({ t: 'shop', x: m.x, y: m.y, z: m.z }); return; }
     if (m.t === 'ispawn') {
       if (!['stick', 'flashlight'].includes(m.type) || ![m.x, m.y, m.z, m.yaw].every(isNum)) return;
       if (items.size >= MAX_ITEMS) { const old = items.keys().next().value; items.delete(old); broadcast({ t: 'idel', id: old }); }
