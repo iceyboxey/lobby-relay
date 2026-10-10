@@ -39,7 +39,7 @@ function clean(p) {
   if (x === null || y === null || z === null) return null;
   const hv = h => Array.isArray(h) && h.length === 3 && h.every(isNum) ? h.map(n => Math.round(n * 100) / 100) : undefined;
   const q4 = a => Array.isArray(a) && a.length === 4 && a.every(isNum) ? a.map(n => Math.round(n * 1000) / 1000) : undefined;
-  return { x, y, z, yaw: yaw || 0, vr: p.vr === 1 ? 1 : 0, hh: isNum(p.hh) ? Math.round(p.hh * 100) / 100 : undefined, hl: hv(p.hl), hr: hv(p.hr), rq: q4(p.rq), lq: q4(p.lq), m: String(p.m || '').slice(0, 4), n: String(p.n || 'Player').replace(/[^\w \-.]/g, '').slice(0, 16) || 'Player' };
+  return { x, y, z, yaw: yaw || 0, vr: p.vr === 1 ? 1 : 0, hh: isNum(p.hh) ? Math.round(p.hh * 100) / 100 : undefined, hl: hv(p.hl), hr: hv(p.hr), rq: q4(p.rq), lq: q4(p.lq), bag: p.bag === 1 ? 1 : 0, m: String(p.m || '').slice(0, 4), n: String(p.n || 'Player').replace(/[^\w \-.]/g, '').slice(0, 16) || 'Player' };
 }
 function itemOut(it) { return { id: it.id, type: it.type, x: it.x, y: it.y, z: it.z, yaw: it.yaw, m: it.m, h: it.h, hd: it.hd, on: it.on }; }
 function send(ws, o) { if (ws.readyState === 1) ws.send(JSON.stringify(o)); }
@@ -81,7 +81,7 @@ wss.on('connection', (ws, req) => {
     if (ws.tokens < 1) return; ws.tokens--;                       // rate limit ~25 msgs/s
     let m; try { m = JSON.parse(data); } catch { return; }
     if (!m || typeof m !== 'object') return;
-    if (m.t === 'p') { const p = clean(m.p); if (!p) return; state.set(ws.id, p); broadcast({ t: 's', id: ws.id, p }, ws); return; }
+    if (m.t === 'p') { const p = clean(m.p); if (!p) return; ws.bag = p.bag; state.set(ws.id, p); broadcast({ t: 's', id: ws.id, p }, ws); return; }
     if (m.t === 'chat') {
       const now2 = Date.now(); if (now2 - (ws.lastChat || 0) < 700) return; ws.lastChat = now2;
       const text = String(m.text || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 120); if (!text) return;
@@ -99,7 +99,7 @@ wss.on('connection', (ws, req) => {
     if (m.t === 'hit') {                                            // melee: server checks weapon, reach, cooldown
       const v = byId(m.id); if (!v || v === ws) return;
       if (now - ws.hitAt < 350 || now < v.protect) return;
-      let dmg = 0; for (const it of items.values()) if (it.h === ws.id && WEAPON[it.type]) dmg = Math.max(dmg, WEAPON[it.type]);
+      let dmg = 0; for (const it of items.values()) if (it.h === ws.id && (it.hd === 'l' || it.hd === 'r') && WEAPON[it.type]) dmg = Math.max(dmg, WEAPON[it.type]);
       if (!dmg) return;
       const a = state.get(ws.id), b = state.get(v.id); if (!a || !b || a.m !== b.m) return;
       if (Math.hypot(a.x - b.x, a.z - b.z) > 4.5 || Math.abs(a.y - b.y) > 4) return;
@@ -122,6 +122,15 @@ wss.on('connection', (ws, req) => {
     } else if (m.t === 'idrop') {
       if (it.h !== ws.id || ![m.x, m.y, m.z, m.yaw].every(isNum)) return;
       Object.assign(it, { x: m.x, y: m.y, z: m.z, yaw: m.yaw, m: String(m.m || '').slice(0, 4), h: null, hd: null }); broadcast({ t: 'item', it: itemOut(it) });
+    } else if (m.t === 'istash') {                                  // put a held item into the backpack (max 4, needs a bag)
+      if (it.h !== ws.id || (it.hd !== 'l' && it.hd !== 'r') || !ws.bag) return;
+      let n = 0; for (const o of items.values()) if (o.h === ws.id && o.hd === 'b') n++;
+      if (n >= 4) return; it.hd = 'b'; broadcast({ t: 'item', it: itemOut(it) });
+    } else if (m.t === 'iunstash') {                                // take it out into a free hand
+      if (it.h !== ws.id || it.hd !== 'b') return;
+      const hd = m.hand === 'r' ? 'r' : 'l';
+      for (const o of items.values()) if (o.h === ws.id && o.hd === hd) return;
+      it.hd = hd; broadcast({ t: 'item', it: itemOut(it) });
     } else if (m.t === 'itog') {
       if (it.h !== ws.id || !TOGGLE.has(it.type)) return; it.on = !!m.on; broadcast({ t: 'item', it: itemOut(it) });
     } else if (m.t === 'isell') {
