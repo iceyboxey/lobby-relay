@@ -27,7 +27,7 @@ const SAFE = { m1: { x: -901.3, z: 15.5, r: 9 }, m2: { x: -1762.7, z: -1172.3, r
 const inSafe = (m, x, z, pad = 0) => { const s = SAFE[m]; return !!s && Math.hypot(x - s.x, z - s.z) < s.r + pad; };
 const MON_DEF = {
   m1: { name: 'Grumblor', hp: 150, dmg: 12, coins: 40, home: { x: -919, y: 7.1, z: 25 } },
-  m2: { name: 'Stalker', hp: 220, dmg: 18, coins: 80, home: { x: -1774, y: -487.8, z: -1149 } } };
+  m2: { name: 'Mimic', hp: 220, dmg: 18, coins: 80, home: { x: -1774, y: -487.8, z: -1149 } } };
 const MON_RESPAWN_MS = 30000, MON_ATK_CD = 900, MON_REACH = 3.6;
 const mons = {};
 for (const k in MON_DEF) { const d = MON_DEF[k]; mons[k] = { m: k, x: d.home.x, y: d.home.y, z: d.home.z, yaw: 0, st: 0, hp: d.hp, max: d.hp, dead: false, owner: null, atkAt: 0 }; }
@@ -94,9 +94,15 @@ wss.on('connection', (ws, req) => {
   ws.on('pong', () => ws.alive = true);
   ws.on('message', data => {
     const now = Date.now(); ws.tokens = Math.min(40, ws.tokens + (now - ws.lastRefill) / 1000 * 25); ws.lastRefill = now;
-    if (ws.tokens < 1) return; ws.tokens--;                       // rate limit ~25 msgs/s
     let m; try { m = JSON.parse(data); } catch { return; }
     if (!m || typeof m !== 'object') return;
+    if (m.t === 'rtc') {                                            // voice chat signalling (WebRTC offer/answer/ice), own rate bucket
+      ws.rtcTok = Math.min(80, (ws.rtcTok === undefined ? 80 : ws.rtcTok) + (now - (ws.rtcAt || now)) / 1000 * 30); ws.rtcAt = now; if (ws.rtcTok < 1) return; ws.rtcTok--;
+      const to = byId(m.to); if (!to || to === ws || !['offer', 'answer', 'ice'].includes(m.k)) return;
+      if (!m.d || typeof m.d !== 'object' || JSON.stringify(m.d).length > 6000) return;
+      send(to, { t: 'rtc', from: ws.id, k: m.k, d: m.d, side: m.side === 'o' ? 'o' : 'i' }); return;
+    }
+    if (ws.tokens < 1) return; ws.tokens--;                       // rate limit ~25 msgs/s
     if (m.t === 'p') { const p = clean(m.p); if (!p) return; ws.bag = p.bag; const pm0 = state.get(ws.id); state.set(ws.id, p); broadcast({ t: 's', id: ws.id, p }, ws); if (!pm0 || pm0.m !== p.m) for (const k in mons) electOwner(k); return; }
     if (m.t === 'chat') {
       const now2 = Date.now(); if (now2 - (ws.lastChat || 0) < 700) return; ws.lastChat = now2;
@@ -109,6 +115,10 @@ wss.on('connection', (ws, req) => {
       if (inSafe(m.m, m.x, m.z)) return;
       mo.x = m.x; mo.y = m.y; mo.z = m.z; mo.yaw = m.yaw; mo.st = (m.st | 0) % 3;
       broadcast({ t: 'mp', m: m.m, x: m.x, y: m.y, z: m.z, yaw: m.yaw, st: mo.st }, ws); return;
+    }
+    if (m.t === 'msay') {                                           // the owner's monster speaks (voice line index)
+      const mo = mons[m.m]; if (!mo || mo.owner !== ws.id || mo.dead || !Number.isInteger(m.i) || m.i < 0 || m.i > 31) return;
+      if (now - (mo.sayAt || 0) < 1500) return; mo.sayAt = now; broadcast({ t: 'msay', m: m.m, i: m.i }); return;
     }
     if (m.t === 'mattack') {                                        // owner says its monster bit a player; server checks everything
       const mo = mons[m.m]; if (!mo || mo.owner !== ws.id || mo.dead || now - mo.atkAt < MON_ATK_CD) return;
