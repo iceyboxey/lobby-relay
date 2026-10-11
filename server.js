@@ -17,70 +17,149 @@ let itemSeq = 1;
 const MAX_ITEMS = 220;
 
 // ---- game tables -------------------------------------------------------------
-const WEAPON = { stick: 15, bat: 30 };                                         // damage per hit
+const WEAPON = { stick: 15, bat: 30, hammer: 40, spear: 25, shockbat: 45 }; // damage per hit
 const SELL = { can: 3, banana: 6, book: 12, duck: 10, gem: 30, trophy: 60, goldbanana: 120 };
 const SELL_WEIGHT = { can: 30, banana: 25, duck: 15, book: 15, gem: 8, trophy: 4, goldbanana: 1 };
-const SHOP_TYPES = ['stick', 'bat', 'flashlight', 'lantern', 'glowstick'];
+const SHOP_TYPES = ['stick', 'bat', 'hammer', 'spear', 'shockbat', 'flashlight', 'lantern', 'glowstick'];
 const ALLOWED = new Set([...SHOP_TYPES, ...Object.keys(SELL)]);
 const TOGGLE = new Set(['flashlight', 'lantern']);
 const RESPAWN_MS = 90000;
+
 // ---- safe zones + monsters (v2.0) ---------------------------------------------
 const SAFE = { m1: { x: -901.3, z: 15.5, r: 9 }, m2: { x: -1762.7, z: -1172.3, r: 7 } };
 const inSafe = (m, x, z, pad = 0) => { const s = SAFE[m]; return !!s && Math.hypot(x - s.x, z - s.z) < s.r + pad; };
 const MON_DEF = {
   m1: { name: 'Grumblor', hp: 150, dmg: 12, coins: 40, home: { x: -919, y: 7.1, z: 25 } },
-  m2: { name: 'Mimic', hp: 220, dmg: 18, coins: 80, home: { x: -1774, y: -487.8, z: -1149 } } };
+  m2: { name: 'Mimic', hp: 220, dmg: 18, coins: 80, home: { x: -1774, y: -487.8, z: -1149 } }
+};
 const MON_RESPAWN_MS = 30000, MON_ATK_CD = 900, MON_REACH = 3.6;
 const mons = {};
-for (const k in MON_DEF) { const d = MON_DEF[k]; mons[k] = { m: k, x: d.home.x, y: d.home.y, z: d.home.z, yaw: 0, st: 0, hp: d.hp, max: d.hp, dead: false, owner: null, atkAt: 0 }; }
-const monOut = k => { const o = mons[k]; return { m: k, x: o.x, y: o.y, z: o.z, yaw: o.yaw, st: o.st, hp: o.hp, max: o.max, dead: o.dead, owner: o.owner }; };
-function electOwner(k) {                                           // one client per map simulates that map's monster
-  const mo = mons[k]; let cur = mo.owner ? byId(mo.owner) : null;
-  if (cur) { const p = state.get(cur.id); if (!p || p.m !== k) cur = null; }
-  if (!cur) for (const c of wss.clients) { const p = state.get(c.id); if (p && p.m === k && c.readyState === 1) { cur = c; break; } }
-  const id = cur ? cur.id : null; if (id !== mo.owner) { mo.owner = id; broadcast({ t: 'mown', m: k, id }); }
+for (const k in MON_DEF) {
+  const d = MON_DEF[k];
+  mons[k] = { m: k, x: d.home.x, y: d.home.y, z: d.home.z, yaw: 0, st: 0, hp: d.hp, max: d.hp, dead: false, owner: null, atkAt: 0 };
 }
-function killPlayer(v, b, by) { v.hp = 100; v.protect = Date.now() + 3000; releaseHeld(v.id, b); broadcast({ t: 'ko', id: v.id, by }); send(v, { t: 'hp', hp: 100 }); }
+const monOut = k => {
+  const o = mons[k];
+  return { m: k, x: o.x, y: o.y, z: o.z, yaw: o.yaw, st: o.st, hp: o.hp, max: o.max, dead: o.dead, owner: o.owner };
+};
+function electOwner(k) {
+  // One client per map simulates that map's monster.
+  const mo = mons[k];
+  let cur = mo.owner ? byId(mo.owner) : null;
+  if (cur) {
+    const p = state.get(cur.id);
+    if (!p || p.m !== k) cur = null;
+  }
+  if (!cur) {
+    for (const c of wss.clients) {
+      const p = state.get(c.id);
+      if (p && p.m === k && c.readyState === 1) {
+        cur = c;
+        break;
+      }
+    }
+  }
+  const id = cur ? cur.id : null;
+  if (id !== mo.owner) {
+    mo.owner = id;
+    broadcast({ t: 'mown', m: k, id });
+  }
+}
+function killPlayer(v, b, by) {
+  v.hp = 100;
+  v.protect = Date.now() + 3000;
+  releaseHeld(v.id, b);
+  broadcast({ t: 'ko', id: v.id, by });
+  send(v, { t: 'hp', hp: 100 });
+}
 const slots = [];                  // world item spawn points {m,x,y,z,yaw}
 const seeded = new Set();          // maps that already got their world items
 
 function pickSellType() {
-  let tot = 0; for (const k in SELL_WEIGHT) tot += SELL_WEIGHT[k];
-  let r = Math.random() * tot; for (const k in SELL_WEIGHT) { r -= SELL_WEIGHT[k]; if (r <= 0) return k; }
+  let tot = 0;
+  for (const k in SELL_WEIGHT) tot += SELL_WEIGHT[k];
+  let r = Math.random() * tot;
+  for (const k in SELL_WEIGHT) {
+    r -= SELL_WEIGHT[k];
+    if (r <= 0) return k;
+  }
   return 'can';
 }
 const num = v => typeof v === 'number' && isFinite(v) && Math.abs(v) < 1e6 ? v : null;
 const isNum = v => typeof v === 'number' && isFinite(v) && Math.abs(v) < 1e6;
+
 function clean(p) {
   if (!p || typeof p !== 'object') return null;
   const x = num(p.x), y = num(p.y), z = num(p.z), yaw = num(p.yaw);
   if (x === null || y === null || z === null) return null;
   const hv = h => Array.isArray(h) && h.length === 3 && h.every(isNum) ? h.map(n => Math.round(n * 100) / 100) : undefined;
   const q4 = a => Array.isArray(a) && a.length === 4 && a.every(isNum) ? a.map(n => Math.round(n * 1000) / 1000) : undefined;
-  return { x, y, z, yaw: yaw || 0, vr: p.vr === 1 ? 1 : 0, hh: isNum(p.hh) ? Math.round(p.hh * 100) / 100 : undefined, hl: hv(p.hl), hr: hv(p.hr), rq: q4(p.rq), lq: q4(p.lq), bag: p.bag === 1 ? 1 : 0, bd: p.bd === 'admin' || p.bd === 'sigma' ? p.bd : '', m: String(p.m || '').slice(0, 4), n: String(p.n || 'Player').replace(/[^\w \-.]/g, '').slice(0, 16) || 'Player' };
+  return {
+    x, y, z,
+    yaw: yaw || 0,
+    c: isNum(p.c) ? Math.max(0, Math.min(99999999, p.c | 0)) : 0,
+    cos: ['none', 'crown', 'halo', 'neon'].includes(p.cos) ? p.cos : 'none',
+    pet: ['none', 'slime', 'ghost', 'mini'].includes(p.pet) ? p.pet : 'none',
+    vr: p.vr === 1 ? 1 : 0,
+    hh: isNum(p.hh) ? Math.round(p.hh * 100) / 100 : undefined,
+    hl: hv(p.hl),
+    hr: hv(p.hr),
+    rq: q4(p.rq),
+    lq: q4(p.lq),
+    bag: p.bag === 1 ? 1 : 0,
+    bd: p.bd === 'admin' || p.bd === 'sigma' ? p.bd : '',
+    m: String(p.m || '').slice(0, 4),
+    n: String(p.n || 'Player').replace(/[^\w \-.]/g, '').slice(0, 16) || 'Player'
+  };
 }
-function itemOut(it) { return { id: it.id, type: it.type, x: it.x, y: it.y, z: it.z, yaw: it.yaw, m: it.m, h: it.h, hd: it.hd, on: it.on }; }
-function send(ws, o) { if (ws.readyState === 1) ws.send(JSON.stringify(o)); }
-function broadcast(o, except) { const s = JSON.stringify(o); for (const c of wss.clients) if (c !== except && c.readyState === 1) c.send(s); }
-function byId(id) { for (const c of wss.clients) if (c.id === id) return c; return null; }
+function itemOut(it) {
+  return { id: it.id, type: it.type, x: it.x, y: it.y, z: it.z, yaw: it.yaw, m: it.m, h: it.h, hd: it.hd, on: it.on };
+}
+function send(ws, o) {
+  if (ws.readyState === 1) ws.send(JSON.stringify(o));
+}
+function broadcast(o, except) {
+  const s = JSON.stringify(o);
+  for (const c of wss.clients) if (c !== except && c.readyState === 1) c.send(s);
+}
+function byId(id) {
+  for (const c of wss.clients) if (c.id === id) return c;
+  return null;
+}
 
 function addItem(o) {
-  if (items.size >= MAX_ITEMS) {                                   // evict the oldest player-made item first
-    let old = null; for (const it of items.values()) if (it.w < 0 && !it.h) { old = it.id; break; }
+  if (items.size >= MAX_ITEMS) {
+    // Evict the oldest player-made item first.
+    let old = null;
+    for (const it of items.values()) if (it.w < 0 && !it.h) {
+      old = it.id;
+      break;
+    }
     if (old === null) old = items.keys().next().value;
-    items.delete(old); broadcast({ t: 'idel', id: old });
+    items.delete(old);
+    broadcast({ t: 'idel', id: old });
   }
   const it = Object.assign({ id: 'i' + (itemSeq++), yaw: 0, m: 'm1', h: null, hd: null, on: true, w: -1 }, o);
-  items.set(it.id, it); broadcast({ t: 'item', it: itemOut(it) }); return it;
+  items.set(it.id, it);
+  broadcast({ t: 'item', it: itemOut(it) });
+  return it;
 }
 function spawnSlot(i) {
-  const s = slots[i]; if (!s) return;
-  for (const it of items.values()) if (it.w === i) return;          // slot already filled
+  const s = slots[i];
+  if (!s) return;
+  for (const it of items.values()) if (it.w === i) return;
   addItem({ type: pickSellType(), x: s.x, y: s.y, z: s.z, yaw: s.yaw, m: s.m, w: i });
 }
 function releaseHeld(id, at) {
   for (const it of items.values()) if (it.h === id) {
-    it.h = null; it.hd = null; if (at) { it.x = at.x; it.y = at.y; it.z = at.z; it.m = at.m; }
+    it.h = null;
+    it.hd = null;
+    if (at) {
+      it.x = at.x;
+      it.y = at.y;
+      it.z = at.z;
+      it.m = at.m;
+    }
     broadcast({ t: 'item', it: itemOut(it) });
   }
 }
@@ -88,131 +167,309 @@ function releaseHeld(id, at) {
 wss.on('connection', (ws, req) => {
   const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
   const n = (ipCount.get(ip) || 0) + 1;
-  if (wss.clients.size > MAX_CLIENTS || n > MAX_PER_IP) { ws.close(1013); return; }
+  if (wss.clients.size > MAX_CLIENTS || n > MAX_PER_IP) {
+    ws.close(1013);
+    return;
+  }
   ipCount.set(ip, n);
-  ws.id = crypto.randomBytes(6).toString('hex'); ws.alive = true; ws.tokens = 40; ws.lastRefill = Date.now();
-  ws.sigma = false; ws.sigmaFails = 0; ws.prank = false; ws.hp = 100; ws.hitAt = 0; ws.mhitAt = 0; ws.protect = 0;
-  send(ws, { t: 'hello', id: ws.id, peers: [...state].map(([id, p]) => ({ id, p })), items: [...items.values()].map(itemOut), mons: Object.keys(mons).map(monOut), pranks: [...wss.clients].filter(c => c.prank).map(c => c.id), seeded: [...seeded] });
+  ws.id = crypto.randomBytes(6).toString('hex');
+  ws.alive = true;
+  ws.tokens = 40;
+  ws.lastRefill = Date.now();
+  ws.sigma = false;
+  ws.sigmaFails = 0;
+  ws.prank = false;
+  ws.hp = 100;
+  ws.hitAt = 0;
+  ws.mhitAt = 0;
+  ws.protect = 0;
+
+  send(ws, {
+    t: 'hello',
+    id: ws.id,
+    peers: [...state].map(([id, p]) => ({ id, p })),
+    items: [...items.values()].map(itemOut),
+    mons: Object.keys(mons).map(monOut),
+    pranks: [...wss.clients].filter(c => c.prank).map(c => c.id),
+    seeded: [...seeded]
+  });
+
   ws.on('pong', () => ws.alive = true);
   ws.on('message', data => {
-    const now = Date.now(); ws.tokens = Math.min(40, ws.tokens + (now - ws.lastRefill) / 1000 * 25); ws.lastRefill = now;
-    let m; try { m = JSON.parse(data); } catch { return; }
+    const now = Date.now();
+    ws.tokens = Math.min(40, ws.tokens + (now - ws.lastRefill) / 1000 * 25);
+    ws.lastRefill = now;
+
+    let m;
+    try { m = JSON.parse(data); } catch { return; }
     if (!m || typeof m !== 'object') return;
-    if (m.t === 'rtc') {                                            // voice chat signalling (WebRTC offer/answer/ice), own rate bucket
-      ws.rtcTok = Math.min(80, (ws.rtcTok === undefined ? 80 : ws.rtcTok) + (now - (ws.rtcAt || now)) / 1000 * 30); ws.rtcAt = now; if (ws.rtcTok < 1) return; ws.rtcTok--;
-      const to = byId(m.to); if (!to || to === ws || !['offer', 'answer', 'ice'].includes(m.k)) return;
+
+    if (m.t === 'rtc') {
+      // Voice chat signalling (WebRTC offer/answer/ice), own rate bucket.
+      ws.rtcTok = Math.min(80, (ws.rtcTok === undefined ? 80 : ws.rtcTok) + (now - (ws.rtcAt || now)) / 1000 * 30);
+      ws.rtcAt = now;
+      if (ws.rtcTok < 1) return;
+      ws.rtcTok--;
+      const to = byId(m.to);
+      if (!to || to === ws || !['offer', 'answer', 'ice'].includes(m.k)) return;
       if (!m.d || typeof m.d !== 'object' || JSON.stringify(m.d).length > 6000) return;
-      send(to, { t: 'rtc', from: ws.id, k: m.k, d: m.d, side: m.side === 'o' ? 'o' : 'i' }); return;
+      send(to, { t: 'rtc', from: ws.id, k: m.k, d: m.d, side: m.side === 'o' ? 'o' : 'i' });
+      return;
     }
-    if (ws.tokens < 1) return; ws.tokens--;                       // rate limit ~25 msgs/s
-    if (m.t === 'p') { const p = clean(m.p); if (!p) return; ws.bag = p.bag; if (p.bd === 'sigma' && !ws.sigma) p.bd = ''; const pm0 = state.get(ws.id); state.set(ws.id, p); broadcast({ t: 's', id: ws.id, p }, ws); if (!pm0 || pm0.m !== p.m) for (const k in mons) electOwner(k); return; }
+
+    if (ws.tokens < 1) return;
+    ws.tokens--;
+
+    if (m.t === 'p') {
+      const p = clean(m.p);
+      if (!p) return;
+      ws.bag = p.bag;
+      if (p.bd === 'sigma' && !ws.sigma) p.bd = '';
+      const pm0 = state.get(ws.id);
+      state.set(ws.id, p);
+      broadcast({ t: 's', id: ws.id, p }, ws);
+      if (!pm0 || pm0.m !== p.m) for (const k in mons) electOwner(k);
+      return;
+    }
+
     if (m.t === 'chat') {
-      const now2 = Date.now(); if (now2 - (ws.lastChat || 0) < 700) return; ws.lastChat = now2;
-      const text = String(m.text || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 120); if (!text) return;
+      const now2 = Date.now();
+      if (now2 - (ws.lastChat || 0) < 700) return;
+      ws.lastChat = now2;
+      const text = String(m.text || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 120);
+      if (!text) return;
       const nm = (state.get(ws.id) || {}).n || 'Player';
-      broadcast({ t: 'chat', id: ws.id, n: nm, text, bd: (state.get(ws.id) || {}).bd || '' }); return;
+      broadcast({ t: 'chat', id: ws.id, n: nm, text, bd: (state.get(ws.id) || {}).bd || '' });
+      return;
     }
-    if (m.t === 'mp') {                                             // owner streams its monster's position
-      const mo = mons[m.m]; if (!mo || mo.owner !== ws.id || mo.dead || ![m.x, m.y, m.z, m.yaw].every(isNum)) return;
+
+    if (m.t === 'mp') {
+      // Owner streams its monster's position.
+      const mo = mons[m.m];
+      if (!mo || mo.owner !== ws.id || mo.dead || ![m.x, m.y, m.z, m.yaw].every(isNum)) return;
       if (inSafe(m.m, m.x, m.z)) return;
-      mo.x = m.x; mo.y = m.y; mo.z = m.z; mo.yaw = m.yaw; mo.st = (m.st | 0) % 3;
-      broadcast({ t: 'mp', m: m.m, x: m.x, y: m.y, z: m.z, yaw: m.yaw, st: mo.st }, ws); return;
+      mo.x = m.x;
+      mo.y = m.y;
+      mo.z = m.z;
+      mo.yaw = m.yaw;
+      mo.st = (m.st | 0) % 3;
+      broadcast({ t: 'mp', m: m.m, x: m.x, y: m.y, z: m.z, yaw: m.yaw, st: mo.st }, ws);
+      return;
     }
-    if (m.t === 'msay') {                                           // the owner's monster speaks (voice line index)
-      const mo = mons[m.m]; if (!mo || mo.owner !== ws.id || mo.dead || !Number.isInteger(m.i) || m.i < 0 || m.i > 31) return;
-      if (now - (mo.sayAt || 0) < 1500) return; mo.sayAt = now; broadcast({ t: 'msay', m: m.m, i: m.i }); return;
+
+    if (m.t === 'msay') {
+      // The owner's monster speaks (voice line index).
+      const mo = mons[m.m];
+      if (!mo || mo.owner !== ws.id || mo.dead || !Number.isInteger(m.i) || m.i < 0 || m.i > 31) return;
+      if (now - (mo.sayAt || 0) < 1500) return;
+      mo.sayAt = now;
+      broadcast({ t: 'msay', m: m.m, i: m.i });
+      return;
     }
-    if (m.t === 'mattack') {                                        // owner says its monster bit a player; server checks everything
-      const mo = mons[m.m]; if (!mo || mo.owner !== ws.id || mo.dead || now - mo.atkAt < MON_ATK_CD) return;
-      const v = byId(m.id); if (!v) return; const b = state.get(v.id); if (!b || b.m !== m.m) return;
+
+    if (m.t === 'mattack') {
+      // Owner says its monster bit a player; server checks everything.
+      const mo = mons[m.m];
+      if (!mo || mo.owner !== ws.id || mo.dead || now - mo.atkAt < MON_ATK_CD) return;
+      const v = byId(m.id);
+      if (!v) return;
+      const b = state.get(v.id);
+      if (!b || b.m !== m.m) return;
       if (inSafe(m.m, b.x, b.z) || now < v.protect) return;
       if (Math.hypot(mo.x - b.x, mo.z - b.z) > MON_REACH || Math.abs(mo.y - b.y) > 3) return;
-      mo.atkAt = now; v.hp -= MON_DEF[m.m].dmg;
+      mo.atkAt = now;
+      v.hp -= MON_DEF[m.m].dmg;
       broadcast({ t: 'hit', id: v.id, by: 'M' + m.m, hp: Math.max(0, v.hp) });
-      if (v.hp <= 0) killPlayer(v, b, 'M' + m.m); else send(v, { t: 'hp', hp: v.hp });
+      if (v.hp <= 0) killPlayer(v, b, 'M' + m.m);
+      else send(v, { t: 'hp', hp: v.hp });
       return;
     }
-    if (m.t === 'mhit') {                                           // a player swings a weapon at a monster
-      const mo = mons[m.m]; if (!mo || mo.dead || now - ws.mhitAt < 350) return;
-      let dmg = 0; for (const it of items.values()) if (it.h === ws.id && (it.hd === 'l' || it.hd === 'r') && WEAPON[it.type]) dmg = Math.max(dmg, WEAPON[it.type]);
-      if (!dmg) return; const a = state.get(ws.id); if (!a || a.m !== m.m) return;
-      if (Math.hypot(a.x - mo.x, a.z - mo.z) > 5 || Math.abs(a.y - mo.y) > 4) return;
-      ws.mhitAt = now; mo.hp -= dmg;
-      if (mo.hp <= 0) {
-        mo.hp = 0; mo.dead = true; broadcast({ t: 'mdead', m: m.m, by: ws.id }); send(ws, { t: 'mkill', m: m.m, coins: MON_DEF[m.m].coins });
-        setTimeout(() => { const d = MON_DEF[m.m]; Object.assign(mo, { x: d.home.x, y: d.home.y, z: d.home.z, hp: d.hp, dead: false, st: 0 }); broadcast({ t: 'mresp', m: m.m, x: mo.x, y: mo.y, z: mo.z, hp: mo.hp, max: mo.max }); electOwner(m.m); }, MON_RESPAWN_MS);
-      } else broadcast({ t: 'mhp', m: m.m, hp: mo.hp, max: mo.max });
-      return;
-    }
-    if (m.t === 'sigma') {                                          // ?sigma pass check (the password lives here, not in the web page)
-      if (now < (ws.sigmaLock || 0)) { send(ws, { t: 'sigmaok', ok: false, wait: true }); return; }
-      const ok = typeof m.pw === 'string' && m.pw.length < 100 && crypto.timingSafeEqual(sha(m.pw), sha(SIGMA_PASS));
-      if (ok) { ws.sigma = true; ws.sigmaFails = 0; } else if (++ws.sigmaFails >= 5) { ws.sigmaFails = 0; ws.sigmaLock = now + 30000; }
-      send(ws, { t: 'sigmaok', ok }); return;
-    }
-    if (m.t === 'prank') {                                          // ?prank listener/broadcaster: everyone hears them, they hear everyone
-      const on = m.on === 1; if (!!ws.prank === on) return; ws.prank = on; broadcast({ t: 'prank', id: ws.id, on: on ? 1 : 0 }); return;
-    }
-    if (m.t === 'heal') { ws.hp = 100; send(ws, { t: 'hp', hp: 100 }); return; }
-    if (m.t === 'seedworld') {                                      // first client to load a map supplies its spawn points
-      const mp = String(m.m || '').slice(0, 4); if (!mp || seeded.has(mp) || !Array.isArray(m.list)) return;
-      seeded.add(mp); broadcast({ t: 'seeded', m: mp });
-      for (const s of m.list.slice(0, 30)) { if (!s || ![s.x, s.y, s.z].every(isNum)) continue; slots.push({ m: mp, x: s.x, y: s.y, z: s.z, yaw: isNum(s.yaw) ? s.yaw : 0 }); spawnSlot(slots.length - 1); }
-      return;
-    }
-    if (m.t === 'hit') {                                            // melee: server checks weapon, reach, cooldown
-      const v = byId(m.id); if (!v || v === ws) return;
-      if (now - ws.hitAt < 350 || now < v.protect) return;
-      let dmg = 0; for (const it of items.values()) if (it.h === ws.id && (it.hd === 'l' || it.hd === 'r') && WEAPON[it.type]) dmg = Math.max(dmg, WEAPON[it.type]);
+
+    if (m.t === 'mhit') {
+      // A player swings a weapon at a monster.
+      const mo = mons[m.m];
+      if (!mo || mo.dead || now - ws.mhitAt < 350) return;
+      let dmg = 0;
+      for (const it of items.values()) if (it.h === ws.id && (it.hd === 'l' || it.hd === 'r') && WEAPON[it.type]) dmg = Math.max(dmg, WEAPON[it.type]);
       if (!dmg) return;
-      const a = state.get(ws.id), b = state.get(v.id); if (!a || !b || a.m !== b.m) return;
-      if (inSafe(a.m, a.x, a.z) || inSafe(b.m, b.x, b.z)) return;       // safe zone: no PvP
+      const a = state.get(ws.id);
+      if (!a || a.m !== m.m) return;
+      if (Math.hypot(a.x - mo.x, a.z - mo.z) > 5 || Math.abs(a.y - mo.y) > 4) return;
+      ws.mhitAt = now;
+      mo.hp -= dmg;
+
+      if (mo.hp <= 0) {
+        mo.hp = 0;
+        mo.dead = true;
+        broadcast({ t: 'mdead', m: m.m, by: ws.id });
+        send(ws, { t: 'mkill', m: m.m, coins: MON_DEF[m.m].coins });
+        setTimeout(() => {
+          const d = MON_DEF[m.m];
+          Object.assign(mo, { x: d.home.x, y: d.home.y, z: d.home.z, hp: d.hp, dead: false, st: 0 });
+          broadcast({ t: 'mresp', m: m.m, x: mo.x, y: mo.y, z: mo.z, hp: mo.hp, max: mo.max });
+          electOwner(m.m);
+        }, MON_RESPAWN_MS);
+      } else {
+        broadcast({ t: 'mhp', m: m.m, hp: mo.hp, max: mo.max });
+      }
+      return;
+    }
+
+    if (m.t === 'sigma') {
+      // ?sigma pass check (the password lives here, not in the web page).
+      if (now < (ws.sigmaLock || 0)) {
+        send(ws, { t: 'sigmaok', ok: false, wait: true });
+        return;
+      }
+      const ok = typeof m.pw === 'string' && m.pw.length < 100 && crypto.timingSafeEqual(sha(m.pw), sha(SIGMA_PASS));
+      if (ok) {
+        ws.sigma = true;
+        ws.sigmaFails = 0;
+      } else if (++ws.sigmaFails >= 5) {
+        ws.sigmaFails = 0;
+        ws.sigmaLock = now + 30000;
+      }
+      send(ws, { t: 'sigmaok', ok });
+      return;
+    }
+
+    if (m.t === 'prank') {
+      // Everyone hears them, they hear everyone.
+      const on = m.on === 1;
+      if (!!ws.prank === on) return;
+      ws.prank = on;
+      broadcast({ t: 'prank', id: ws.id, on: on ? 1 : 0 });
+      return;
+    }
+
+    if (m.t === 'heal') {
+      ws.hp = 100;
+      send(ws, { t: 'hp', hp: 100 });
+      return;
+    }
+
+    if (m.t === 'seedworld') {
+      // First client to load a map supplies its spawn points.
+      const mp = String(m.m || '').slice(0, 4);
+      if (!mp || seeded.has(mp) || !Array.isArray(m.list)) return;
+      seeded.add(mp);
+      broadcast({ t: 'seeded', m: mp });
+      for (const s of m.list.slice(0, 30)) {
+        if (!s || ![s.x, s.y, s.z].every(isNum)) continue;
+        slots.push({ m: mp, x: s.x, y: s.y, z: s.z, yaw: isNum(s.yaw) ? s.yaw : 0 });
+        spawnSlot(slots.length - 1);
+      }
+      return;
+    }
+
+    if (m.t === 'hit') {
+      // Melee: server checks weapon, reach, cooldown.
+      const v = byId(m.id);
+      if (!v || v === ws) return;
+      if (now - ws.hitAt < 350 || now < v.protect) return;
+      let dmg = 0;
+      for (const it of items.values()) if (it.h === ws.id && (it.hd === 'l' || it.hd === 'r') && WEAPON[it.type]) dmg = Math.max(dmg, WEAPON[it.type]);
+      if (!dmg) return;
+      const a = state.get(ws.id), b = state.get(v.id);
+      if (!a || !b || a.m !== b.m) return;
+      if (inSafe(a.m, a.x, a.z) || inSafe(b.m, b.x, b.z)) return;
       if (Math.hypot(a.x - b.x, a.z - b.z) > 4.5 || Math.abs(a.y - b.y) > 4) return;
-      ws.hitAt = now; v.hp -= dmg;
+      ws.hitAt = now;
+      v.hp -= dmg;
       broadcast({ t: 'hit', id: v.id, by: ws.id, hp: Math.max(0, v.hp) });
       if (v.hp <= 0) killPlayer(v, b, ws.id);
       else send(v, { t: 'hp', hp: v.hp });
       return;
     }
+
     if (m.t === 'ispawn') {
       if (!ALLOWED.has(m.type) || ![m.x, m.y, m.z, m.yaw].every(isNum)) return;
-      addItem({ type: m.type, x: m.x, y: m.y, z: m.z, yaw: m.yaw, m: String(m.m || '').slice(0, 4) }); return;
+      addItem({ type: m.type, x: m.x, y: m.y, z: m.z, yaw: m.yaw, m: String(m.m || '').slice(0, 4) });
+      return;
     }
-    const it = items.get(m.id); if (!it) return;
+
+    const it = items.get(m.id);
+    if (!it) return;
+
     if (m.t === 'igrab') {
       if (it.h) return;
       const hd = m.hand === 'r' ? 'r' : 'l';
-      for (const o of items.values()) if (o.h === ws.id && o.hd === hd) return;   // that hand is full
-      it.h = ws.id; it.hd = hd; broadcast({ t: 'item', it: itemOut(it) });
+      for (const o of items.values()) if (o.h === ws.id && o.hd === hd) return;
+      it.h = ws.id;
+      it.hd = hd;
+      broadcast({ t: 'item', it: itemOut(it) });
     } else if (m.t === 'idrop') {
       if (it.h !== ws.id || ![m.x, m.y, m.z, m.yaw].every(isNum)) return;
-      Object.assign(it, { x: m.x, y: m.y, z: m.z, yaw: m.yaw, m: String(m.m || '').slice(0, 4), h: null, hd: null }); broadcast({ t: 'item', it: itemOut(it) });
-    } else if (m.t === 'istash') {                                  // put a held item into the backpack (max 4, needs a bag)
+      Object.assign(it, { x: m.x, y: m.y, z: m.z, yaw: m.yaw, m: String(m.m || '').slice(0, 4), h: null, hd: null });
+      broadcast({ t: 'item', it: itemOut(it) });
+    } else if (m.t === 'istash') {
+      // Put a held item into the backpack (max 4, needs a bag).
       if (it.h !== ws.id || (it.hd !== 'l' && it.hd !== 'r') || !ws.bag) return;
-      let n = 0; for (const o of items.values()) if (o.h === ws.id && o.hd === 'b') n++;
-      if (n >= 4) return; it.hd = 'b'; broadcast({ t: 'item', it: itemOut(it) });
-    } else if (m.t === 'iunstash') {                                // take it out into a free hand
+      let n = 0;
+      for (const o of items.values()) if (o.h === ws.id && o.hd === 'b') n++;
+      if (n >= 4) return;
+      it.hd = 'b';
+      broadcast({ t: 'item', it: itemOut(it) });
+    } else if (m.t === 'iunstash') {
+      // Take it out into a free hand.
       if (it.h !== ws.id || it.hd !== 'b') return;
       const hd = m.hand === 'r' ? 'r' : 'l';
       for (const o of items.values()) if (o.h === ws.id && o.hd === hd) return;
-      it.hd = hd; broadcast({ t: 'item', it: itemOut(it) });
+      it.hd = hd;
+      broadcast({ t: 'item', it: itemOut(it) });
     } else if (m.t === 'itog') {
-      if (it.h !== ws.id || !TOGGLE.has(it.type)) return; it.on = !!m.on; broadcast({ t: 'item', it: itemOut(it) });
+      if (it.h !== ws.id || !TOGGLE.has(it.type)) return;
+      it.on = !!m.on;
+      broadcast({ t: 'item', it: itemOut(it) });
     } else if (m.t === 'isell') {
-      const val = SELL[it.type]; if (!val || (it.h && it.h !== ws.id)) return;
-      items.delete(it.id); broadcast({ t: 'idel', id: it.id });
+      const val = SELL[it.type];
+      if (!val || (it.h && it.h !== ws.id)) return;
+      items.delete(it.id);
+      broadcast({ t: 'idel', id: it.id });
       send(ws, { t: 'sold', type: it.type, coins: val });
-      if (it.w >= 0) { const i = it.w; setTimeout(() => spawnSlot(i), RESPAWN_MS); }
+      if (it.w >= 0) {
+        const i = it.w;
+        setTimeout(() => spawnSlot(i), RESPAWN_MS);
+      }
     }
   });
+
   ws.on('close', () => {
     const last = state.get(ws.id);
     releaseHeld(ws.id, last);
-    state.delete(ws.id); broadcast({ t: 'l', id: ws.id }); if (ws.prank) broadcast({ t: 'prank', id: ws.id, on: 0 }); for (const k in mons) if (mons[k].owner === ws.id) { mons[k].owner = null; electOwner(k); }
-    const c = (ipCount.get(ip) || 1) - 1; if (c <= 0) ipCount.delete(ip); else ipCount.set(ip, c);
+    state.delete(ws.id);
+    broadcast({ t: 'l', id: ws.id });
+    if (ws.prank) broadcast({ t: 'prank', id: ws.id, on: 0 });
+    for (const k in mons) if (mons[k].owner === ws.id) {
+      mons[k].owner = null;
+      electOwner(k);
+    }
+    const c = (ipCount.get(ip) || 1) - 1;
+    if (c <= 0) ipCount.delete(ip);
+    else ipCount.set(ip, c);
   });
 });
-setInterval(() => { for (const k in mons) electOwner(k); }, 2000);
-setInterval(() => { for (const c of wss.clients) if (c.hp < 100) { c.hp = Math.min(100, c.hp + 3); send(c, { t: 'hp', hp: c.hp }); } }, 1000);   // slow health regen
-setInterval(() => { for (const c of wss.clients) { if (!c.alive) { c.terminate(); continue; } c.alive = false; c.ping(); } }, 30000);
+
+setInterval(() => {
+  for (const k in mons) electOwner(k);
+}, 2000);
+
+setInterval(() => {
+  for (const c of wss.clients) if (c.hp < 100) {
+    c.hp = Math.min(100, c.hp + 3);
+    send(c, { t: 'hp', hp: c.hp });
+  }
+}, 1000); // slow health regen
+
+setInterval(() => {
+  for (const c of wss.clients) {
+    if (!c.alive) {
+      c.terminate();
+      continue;
+    }
+    c.alive = false;
+    c.ping();
+  }
+}, 30000);
+
 server.listen(PORT, () => console.log('relay listening on ' + PORT));
