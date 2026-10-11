@@ -12,7 +12,6 @@ const state = new Map();           // id -> last valid presence
 const ipCount = new Map();
 const items = new Map();           // id -> {id,type,x,y,z,yaw,m,h,hd,on,w}
 let itemSeq = 1;
-let shop = null;                   // {x,y,z} set by any player pressing B
 const MAX_ITEMS = 220;
 
 // ---- game tables -------------------------------------------------------------
@@ -23,6 +22,23 @@ const SHOP_TYPES = ['stick', 'bat', 'flashlight', 'lantern', 'glowstick'];
 const ALLOWED = new Set([...SHOP_TYPES, ...Object.keys(SELL)]);
 const TOGGLE = new Set(['flashlight', 'lantern']);
 const RESPAWN_MS = 90000;
+// ---- safe zones + monsters (v2.0) ---------------------------------------------
+const SAFE = { m1: { x: -901.3, z: 15.5, r: 9 }, m2: { x: -1762.7, z: -1172.3, r: 7 } };
+const inSafe = (m, x, z, pad = 0) => { const s = SAFE[m]; return !!s && Math.hypot(x - s.x, z - s.z) < s.r + pad; };
+const MON_DEF = {
+  m1: { name: 'Grumblor', hp: 150, dmg: 12, coins: 40, home: { x: -919, y: 7.1, z: 25 } },
+  m2: { name: 'Stalker', hp: 220, dmg: 18, coins: 80, home: { x: -1774, y: -487.8, z: -1149 } } };
+const MON_RESPAWN_MS = 30000, MON_ATK_CD = 900, MON_REACH = 3.6;
+const mons = {};
+for (const k in MON_DEF) { const d = MON_DEF[k]; mons[k] = { m: k, x: d.home.x, y: d.home.y, z: d.home.z, yaw: 0, st: 0, hp: d.hp, max: d.hp, dead: false, owner: null, atkAt: 0 }; }
+const monOut = k => { const o = mons[k]; return { m: k, x: o.x, y: o.y, z: o.z, yaw: o.yaw, st: o.st, hp: o.hp, max: o.max, dead: o.dead, owner: o.owner }; };
+function electOwner(k) {                                           // one client per map simulates that map's monster
+  const mo = mons[k]; let cur = mo.owner ? byId(mo.owner) : null;
+  if (cur) { const p = state.get(cur.id); if (!p || p.m !== k) cur = null; }
+  if (!cur) for (const c of wss.clients) { const p = state.get(c.id); if (p && p.m === k && c.readyState === 1) { cur = c; break; } }
+  const id = cur ? cur.id : null; if (id !== mo.owner) { mo.owner = id; broadcast({ t: 'mown', m: k, id }); }
+}
+function killPlayer(v, b, by) { v.hp = 100; v.protect = Date.now() + 3000; releaseHeld(v.id, b); broadcast({ t: 'ko', id: v.id, by }); send(v, { t: 'hp', hp: 100 }); }
 const slots = [];                  // world item spawn points {m,x,y,z,yaw}
 const seeded = new Set();          // maps that already got their world items
 
@@ -73,22 +89,49 @@ wss.on('connection', (ws, req) => {
   if (wss.clients.size > MAX_CLIENTS || n > MAX_PER_IP) { ws.close(1013); return; }
   ipCount.set(ip, n);
   ws.id = crypto.randomBytes(6).toString('hex'); ws.alive = true; ws.tokens = 40; ws.lastRefill = Date.now();
-  ws.hp = 100; ws.hitAt = 0; ws.protect = 0;
-  send(ws, { t: 'hello', id: ws.id, peers: [...state].map(([id, p]) => ({ id, p })), items: [...items.values()].map(itemOut), shop, seeded: [...seeded] });
+  ws.hp = 100; ws.hitAt = 0; ws.mhitAt = 0; ws.protect = 0;
+  send(ws, { t: 'hello', id: ws.id, peers: [...state].map(([id, p]) => ({ id, p })), items: [...items.values()].map(itemOut), mons: Object.keys(mons).map(monOut), seeded: [...seeded] });
   ws.on('pong', () => ws.alive = true);
   ws.on('message', data => {
     const now = Date.now(); ws.tokens = Math.min(40, ws.tokens + (now - ws.lastRefill) / 1000 * 25); ws.lastRefill = now;
     if (ws.tokens < 1) return; ws.tokens--;                       // rate limit ~25 msgs/s
     let m; try { m = JSON.parse(data); } catch { return; }
     if (!m || typeof m !== 'object') return;
-    if (m.t === 'p') { const p = clean(m.p); if (!p) return; ws.bag = p.bag; state.set(ws.id, p); broadcast({ t: 's', id: ws.id, p }, ws); return; }
+    if (m.t === 'p') { const p = clean(m.p); if (!p) return; ws.bag = p.bag; const pm0 = state.get(ws.id); state.set(ws.id, p); broadcast({ t: 's', id: ws.id, p }, ws); if (!pm0 || pm0.m !== p.m) for (const k in mons) electOwner(k); return; }
     if (m.t === 'chat') {
       const now2 = Date.now(); if (now2 - (ws.lastChat || 0) < 700) return; ws.lastChat = now2;
       const text = String(m.text || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 120); if (!text) return;
       const nm = (state.get(ws.id) || {}).n || 'Player';
       broadcast({ t: 'chat', id: ws.id, n: nm, text }); return;
     }
-    if (m.t === 'shop') { if (![m.x, m.y, m.z].every(isNum)) return; shop = { x: m.x, y: m.y, z: m.z }; broadcast({ t: 'shop', x: m.x, y: m.y, z: m.z }); return; }
+    if (m.t === 'mp') {                                             // owner streams its monster's position
+      const mo = mons[m.m]; if (!mo || mo.owner !== ws.id || mo.dead || ![m.x, m.y, m.z, m.yaw].every(isNum)) return;
+      if (inSafe(m.m, m.x, m.z)) return;
+      mo.x = m.x; mo.y = m.y; mo.z = m.z; mo.yaw = m.yaw; mo.st = (m.st | 0) % 3;
+      broadcast({ t: 'mp', m: m.m, x: m.x, y: m.y, z: m.z, yaw: m.yaw, st: mo.st }, ws); return;
+    }
+    if (m.t === 'mattack') {                                        // owner says its monster bit a player; server checks everything
+      const mo = mons[m.m]; if (!mo || mo.owner !== ws.id || mo.dead || now - mo.atkAt < MON_ATK_CD) return;
+      const v = byId(m.id); if (!v) return; const b = state.get(v.id); if (!b || b.m !== m.m) return;
+      if (inSafe(m.m, b.x, b.z) || now < v.protect) return;
+      if (Math.hypot(mo.x - b.x, mo.z - b.z) > MON_REACH || Math.abs(mo.y - b.y) > 3) return;
+      mo.atkAt = now; v.hp -= MON_DEF[m.m].dmg;
+      broadcast({ t: 'hit', id: v.id, by: 'M' + m.m, hp: Math.max(0, v.hp) });
+      if (v.hp <= 0) killPlayer(v, b, 'M' + m.m); else send(v, { t: 'hp', hp: v.hp });
+      return;
+    }
+    if (m.t === 'mhit') {                                           // a player swings a weapon at a monster
+      const mo = mons[m.m]; if (!mo || mo.dead || now - ws.mhitAt < 350) return;
+      let dmg = 0; for (const it of items.values()) if (it.h === ws.id && (it.hd === 'l' || it.hd === 'r') && WEAPON[it.type]) dmg = Math.max(dmg, WEAPON[it.type]);
+      if (!dmg) return; const a = state.get(ws.id); if (!a || a.m !== m.m) return;
+      if (Math.hypot(a.x - mo.x, a.z - mo.z) > 5 || Math.abs(a.y - mo.y) > 4) return;
+      ws.mhitAt = now; mo.hp -= dmg;
+      if (mo.hp <= 0) {
+        mo.hp = 0; mo.dead = true; broadcast({ t: 'mdead', m: m.m, by: ws.id }); send(ws, { t: 'mkill', m: m.m, coins: MON_DEF[m.m].coins });
+        setTimeout(() => { const d = MON_DEF[m.m]; Object.assign(mo, { x: d.home.x, y: d.home.y, z: d.home.z, hp: d.hp, dead: false, st: 0 }); broadcast({ t: 'mresp', m: m.m, x: mo.x, y: mo.y, z: mo.z, hp: mo.hp, max: mo.max }); electOwner(m.m); }, MON_RESPAWN_MS);
+      } else broadcast({ t: 'mhp', m: m.m, hp: mo.hp, max: mo.max });
+      return;
+    }
     if (m.t === 'heal') { ws.hp = 100; send(ws, { t: 'hp', hp: 100 }); return; }
     if (m.t === 'seedworld') {                                      // first client to load a map supplies its spawn points
       const mp = String(m.m || '').slice(0, 4); if (!mp || seeded.has(mp) || !Array.isArray(m.list)) return;
@@ -102,10 +145,11 @@ wss.on('connection', (ws, req) => {
       let dmg = 0; for (const it of items.values()) if (it.h === ws.id && (it.hd === 'l' || it.hd === 'r') && WEAPON[it.type]) dmg = Math.max(dmg, WEAPON[it.type]);
       if (!dmg) return;
       const a = state.get(ws.id), b = state.get(v.id); if (!a || !b || a.m !== b.m) return;
+      if (inSafe(a.m, a.x, a.z) || inSafe(b.m, b.x, b.z)) return;       // safe zone: no PvP
       if (Math.hypot(a.x - b.x, a.z - b.z) > 4.5 || Math.abs(a.y - b.y) > 4) return;
       ws.hitAt = now; v.hp -= dmg;
       broadcast({ t: 'hit', id: v.id, by: ws.id, hp: Math.max(0, v.hp) });
-      if (v.hp <= 0) { v.hp = 100; v.protect = now + 3000; releaseHeld(v.id, b); broadcast({ t: 'ko', id: v.id, by: ws.id }); send(v, { t: 'hp', hp: 100 }); }
+      if (v.hp <= 0) killPlayer(v, b, ws.id);
       else send(v, { t: 'hp', hp: v.hp });
       return;
     }
@@ -143,10 +187,11 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => {
     const last = state.get(ws.id);
     releaseHeld(ws.id, last);
-    state.delete(ws.id); broadcast({ t: 'l', id: ws.id });
+    state.delete(ws.id); broadcast({ t: 'l', id: ws.id }); for (const k in mons) if (mons[k].owner === ws.id) { mons[k].owner = null; electOwner(k); }
     const c = (ipCount.get(ip) || 1) - 1; if (c <= 0) ipCount.delete(ip); else ipCount.set(ip, c);
   });
 });
+setInterval(() => { for (const k in mons) electOwner(k); }, 2000);
 setInterval(() => { for (const c of wss.clients) if (c.hp < 100) { c.hp = Math.min(100, c.hp + 3); send(c, { t: 'hp', hp: c.hp }); } }, 1000);   // slow health regen
 setInterval(() => { for (const c of wss.clients) { if (!c.alive) { c.terminate(); continue; } c.alive = false; c.ping(); } }, 30000);
 server.listen(PORT, () => console.log('relay listening on ' + PORT));
