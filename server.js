@@ -3,6 +3,8 @@
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const crypto = require('crypto');
+const SIGMA_PASS = process.env.SIGMA_PASS || 'iceyistuff';      // password for the ?sigma badge (override with the SIGMA_PASS env var on Render)
+const sha = s => crypto.createHash('sha256').update(String(s)).digest();
 
 const PORT = process.env.PORT || 8080;
 const MAX_CLIENTS = 200, MAX_PER_IP = 6;
@@ -55,7 +57,7 @@ function clean(p) {
   if (x === null || y === null || z === null) return null;
   const hv = h => Array.isArray(h) && h.length === 3 && h.every(isNum) ? h.map(n => Math.round(n * 100) / 100) : undefined;
   const q4 = a => Array.isArray(a) && a.length === 4 && a.every(isNum) ? a.map(n => Math.round(n * 1000) / 1000) : undefined;
-  return { x, y, z, yaw: yaw || 0, vr: p.vr === 1 ? 1 : 0, hh: isNum(p.hh) ? Math.round(p.hh * 100) / 100 : undefined, hl: hv(p.hl), hr: hv(p.hr), rq: q4(p.rq), lq: q4(p.lq), bag: p.bag === 1 ? 1 : 0, m: String(p.m || '').slice(0, 4), n: String(p.n || 'Player').replace(/[^\w \-.]/g, '').slice(0, 16) || 'Player' };
+  return { x, y, z, yaw: yaw || 0, vr: p.vr === 1 ? 1 : 0, hh: isNum(p.hh) ? Math.round(p.hh * 100) / 100 : undefined, hl: hv(p.hl), hr: hv(p.hr), rq: q4(p.rq), lq: q4(p.lq), bag: p.bag === 1 ? 1 : 0, bd: p.bd === 'admin' || p.bd === 'sigma' ? p.bd : '', m: String(p.m || '').slice(0, 4), n: String(p.n || 'Player').replace(/[^\w \-.]/g, '').slice(0, 16) || 'Player' };
 }
 function itemOut(it) { return { id: it.id, type: it.type, x: it.x, y: it.y, z: it.z, yaw: it.yaw, m: it.m, h: it.h, hd: it.hd, on: it.on }; }
 function send(ws, o) { if (ws.readyState === 1) ws.send(JSON.stringify(o)); }
@@ -89,8 +91,8 @@ wss.on('connection', (ws, req) => {
   if (wss.clients.size > MAX_CLIENTS || n > MAX_PER_IP) { ws.close(1013); return; }
   ipCount.set(ip, n);
   ws.id = crypto.randomBytes(6).toString('hex'); ws.alive = true; ws.tokens = 40; ws.lastRefill = Date.now();
-  ws.hp = 100; ws.hitAt = 0; ws.mhitAt = 0; ws.protect = 0;
-  send(ws, { t: 'hello', id: ws.id, peers: [...state].map(([id, p]) => ({ id, p })), items: [...items.values()].map(itemOut), mons: Object.keys(mons).map(monOut), seeded: [...seeded] });
+  ws.sigma = false; ws.sigmaFails = 0; ws.prank = false; ws.hp = 100; ws.hitAt = 0; ws.mhitAt = 0; ws.protect = 0;
+  send(ws, { t: 'hello', id: ws.id, peers: [...state].map(([id, p]) => ({ id, p })), items: [...items.values()].map(itemOut), mons: Object.keys(mons).map(monOut), pranks: [...wss.clients].filter(c => c.prank).map(c => c.id), seeded: [...seeded] });
   ws.on('pong', () => ws.alive = true);
   ws.on('message', data => {
     const now = Date.now(); ws.tokens = Math.min(40, ws.tokens + (now - ws.lastRefill) / 1000 * 25); ws.lastRefill = now;
@@ -103,12 +105,12 @@ wss.on('connection', (ws, req) => {
       send(to, { t: 'rtc', from: ws.id, k: m.k, d: m.d, side: m.side === 'o' ? 'o' : 'i' }); return;
     }
     if (ws.tokens < 1) return; ws.tokens--;                       // rate limit ~25 msgs/s
-    if (m.t === 'p') { const p = clean(m.p); if (!p) return; ws.bag = p.bag; const pm0 = state.get(ws.id); state.set(ws.id, p); broadcast({ t: 's', id: ws.id, p }, ws); if (!pm0 || pm0.m !== p.m) for (const k in mons) electOwner(k); return; }
+    if (m.t === 'p') { const p = clean(m.p); if (!p) return; ws.bag = p.bag; if (p.bd === 'sigma' && !ws.sigma) p.bd = ''; const pm0 = state.get(ws.id); state.set(ws.id, p); broadcast({ t: 's', id: ws.id, p }, ws); if (!pm0 || pm0.m !== p.m) for (const k in mons) electOwner(k); return; }
     if (m.t === 'chat') {
       const now2 = Date.now(); if (now2 - (ws.lastChat || 0) < 700) return; ws.lastChat = now2;
       const text = String(m.text || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 120); if (!text) return;
       const nm = (state.get(ws.id) || {}).n || 'Player';
-      broadcast({ t: 'chat', id: ws.id, n: nm, text }); return;
+      broadcast({ t: 'chat', id: ws.id, n: nm, text, bd: (state.get(ws.id) || {}).bd || '' }); return;
     }
     if (m.t === 'mp') {                                             // owner streams its monster's position
       const mo = mons[m.m]; if (!mo || mo.owner !== ws.id || mo.dead || ![m.x, m.y, m.z, m.yaw].every(isNum)) return;
@@ -141,6 +143,15 @@ wss.on('connection', (ws, req) => {
         setTimeout(() => { const d = MON_DEF[m.m]; Object.assign(mo, { x: d.home.x, y: d.home.y, z: d.home.z, hp: d.hp, dead: false, st: 0 }); broadcast({ t: 'mresp', m: m.m, x: mo.x, y: mo.y, z: mo.z, hp: mo.hp, max: mo.max }); electOwner(m.m); }, MON_RESPAWN_MS);
       } else broadcast({ t: 'mhp', m: m.m, hp: mo.hp, max: mo.max });
       return;
+    }
+    if (m.t === 'sigma') {                                          // ?sigma pass check (the password lives here, not in the web page)
+      if (now < (ws.sigmaLock || 0)) { send(ws, { t: 'sigmaok', ok: false, wait: true }); return; }
+      const ok = typeof m.pw === 'string' && m.pw.length < 100 && crypto.timingSafeEqual(sha(m.pw), sha(SIGMA_PASS));
+      if (ok) { ws.sigma = true; ws.sigmaFails = 0; } else if (++ws.sigmaFails >= 5) { ws.sigmaFails = 0; ws.sigmaLock = now + 30000; }
+      send(ws, { t: 'sigmaok', ok }); return;
+    }
+    if (m.t === 'prank') {                                          // ?prank listener/broadcaster: everyone hears them, they hear everyone
+      const on = m.on === 1; if (!!ws.prank === on) return; ws.prank = on; broadcast({ t: 'prank', id: ws.id, on: on ? 1 : 0 }); return;
     }
     if (m.t === 'heal') { ws.hp = 100; send(ws, { t: 'hp', hp: 100 }); return; }
     if (m.t === 'seedworld') {                                      // first client to load a map supplies its spawn points
@@ -197,7 +208,7 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => {
     const last = state.get(ws.id);
     releaseHeld(ws.id, last);
-    state.delete(ws.id); broadcast({ t: 'l', id: ws.id }); for (const k in mons) if (mons[k].owner === ws.id) { mons[k].owner = null; electOwner(k); }
+    state.delete(ws.id); broadcast({ t: 'l', id: ws.id }); if (ws.prank) broadcast({ t: 'prank', id: ws.id, on: 0 }); for (const k in mons) if (mons[k].owner === ws.id) { mons[k].owner = null; electOwner(k); }
     const c = (ipCount.get(ip) || 1) - 1; if (c <= 0) ipCount.delete(ip); else ipCount.set(ip, c);
   });
 });
