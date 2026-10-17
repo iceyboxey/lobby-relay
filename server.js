@@ -57,7 +57,7 @@ function clean(p) {
   if (x === null || y === null || z === null) return null;
   const hv = h => Array.isArray(h) && h.length === 3 && h.every(isNum) ? h.map(n => Math.round(n * 100) / 100) : undefined;
   const q4 = a => Array.isArray(a) && a.length === 4 && a.every(isNum) ? a.map(n => Math.round(n * 1000) / 1000) : undefined;
-  return { x, y, z, yaw: yaw || 0, vr: p.vr === 1 ? 1 : 0, hh: isNum(p.hh) ? Math.round(p.hh * 100) / 100 : undefined, hl: hv(p.hl), hr: hv(p.hr), rq: q4(p.rq), lq: q4(p.lq), bag: p.bag === 1 ? 1 : 0, bd: p.bd === 'admin' || p.bd === 'sigma' ? p.bd : '', m: String(p.m || '').slice(0, 4), n: String(p.n || 'Player').replace(/[^\w \-.]/g, '').slice(0, 16) || 'Player' };
+  return { x, y, z, yaw: yaw || 0, vr: p.vr === 1 ? 1 : 0, hh: isNum(p.hh) ? Math.round(p.hh * 100) / 100 : undefined, hl: hv(p.hl), hr: hv(p.hr), rq: q4(p.rq), lq: q4(p.lq), bag: p.bag === 1 ? 1 : 0, bd: p.bd === 'admin' || p.bd === 'sigma' ? p.bd : '', hat: typeof p.hat === 'string' && /^[a-z0-9_]{1,32}$/.test(p.hat) ? p.hat : '', m: String(p.m || '').slice(0, 4), n: String(p.n || 'Player').replace(/[^\w \-.]/g, '').slice(0, 16) || 'Player' };
 }
 function itemOut(it) { return { id: it.id, type: it.type, x: it.x, y: it.y, z: it.z, yaw: it.yaw, m: it.m, h: it.h, hd: it.hd, on: it.on }; }
 function send(ws, o) { if (ws.readyState === 1) ws.send(JSON.stringify(o)); }
