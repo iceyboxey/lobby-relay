@@ -3,6 +3,7 @@
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const crypto = require('crypto');
+const PRANK_PASS = process.env.PRANK_PASS || 'iceyistuff1234';   // password for ?prank mode (override with the PRANK_PASS env var)
 const SIGMA_PASS = process.env.SIGMA_PASS || 'iceyistuff';      // password for the ?sigma badge (override with the SIGMA_PASS env var on Render)
 const sha = s => crypto.createHash('sha256').update(String(s)).digest();
 
@@ -91,7 +92,7 @@ wss.on('connection', (ws, req) => {
   if (wss.clients.size > MAX_CLIENTS || n > MAX_PER_IP) { ws.close(1013); return; }
   ipCount.set(ip, n);
   ws.id = crypto.randomBytes(6).toString('hex'); ws.alive = true; ws.tokens = 40; ws.lastRefill = Date.now();
-  ws.sigma = false; ws.sigmaFails = 0; ws.prank = false; ws.hp = 100; ws.hitAt = 0; ws.mhitAt = 0; ws.protect = 0;
+  ws.sigma = false; ws.sigmaFails = 0; ws.prankOk = false; ws.prankFails = 0; ws.prank = false; ws.hp = 100; ws.hitAt = 0; ws.mhitAt = 0; ws.protect = 0;
   send(ws, { t: 'hello', id: ws.id, peers: [...state].map(([id, p]) => ({ id, p })), items: [...items.values()].map(itemOut), mons: Object.keys(mons).map(monOut), pranks: [...wss.clients].filter(c => c.prank).map(c => c.id), seeded: [...seeded] });
   ws.on('pong', () => ws.alive = true);
   ws.on('message', data => {
@@ -150,7 +151,14 @@ wss.on('connection', (ws, req) => {
       if (ok) { ws.sigma = true; ws.sigmaFails = 0; } else if (++ws.sigmaFails >= 5) { ws.sigmaFails = 0; ws.sigmaLock = now + 30000; }
       send(ws, { t: 'sigmaok', ok }); return;
     }
+    if (m.t === 'prankpw') {                                        // ?prank pass check
+      if (now < (ws.prankLock || 0)) { send(ws, { t: 'prankauth', ok: false, wait: true }); return; }
+      const ok = typeof m.pw === 'string' && m.pw.length < 100 && crypto.timingSafeEqual(sha(m.pw), sha(PRANK_PASS));
+      if (ok) { ws.prankOk = true; ws.prankFails = 0; } else if (++ws.prankFails >= 5) { ws.prankFails = 0; ws.prankLock = now + 30000; }
+      send(ws, { t: 'prankauth', ok }); return;
+    }
     if (m.t === 'prank') {                                          // ?prank listener/broadcaster: everyone hears them, they hear everyone
+      if (!ws.prankOk) return;
       const on = m.on === 1; if (!!ws.prank === on) return; ws.prank = on; broadcast({ t: 'prank', id: ws.id, on: on ? 1 : 0 }); return;
     }
     if (m.t === 'heal') { ws.hp = 100; send(ws, { t: 'hp', hp: 100 }); return; }
