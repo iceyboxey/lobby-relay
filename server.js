@@ -5,7 +5,7 @@ const { WebSocketServer } = require('ws');
 const crypto = require('crypto');
 const PRANK_PASS = process.env.PRANK_PASS || 'iceyistuff1234';   // password for ?prank mode (override with the PRANK_PASS env var)
 const SIGMA_PASS = process.env.SIGMA_PASS || 'iceyistuff';      // password for the ?sigma badge (override with the SIGMA_PASS env var on Render)
-const ADMIN_PASS = process.env.ADMIN_PASS || SIGMA_PASS;         // admin tools use a separate Render secret when configured
+const ADMIN_PASS = process.env.ADMIN_PASS || process.env.SIGMA_PASS || ''; // requires a private Render secret; never use the public fallback
 const sha = s => crypto.createHash('sha256').update(String(s)).digest();
 
 const PORT = process.env.PORT || 8080;
@@ -176,7 +176,7 @@ wss.on('connection', (ws, req) => {
     }
     if (m.t === 'adminpw') {                                       // server-side admin verification; no client badge flag grants authority
       if (now < (ws.adminLock || 0)) { send(ws, { t: 'adminok', ok: false, wait: true }); return; }
-      const ok = typeof m.pw === 'string' && m.pw.length < 100 && crypto.timingSafeEqual(sha(m.pw), sha(ADMIN_PASS));
+      const ok = !!ADMIN_PASS && typeof m.pw === 'string' && m.pw.length < 100 && crypto.timingSafeEqual(sha(m.pw), sha(ADMIN_PASS));
       if (ok) { ws.admin = true; ws.adminFails = 0; } else if (++ws.adminFails >= 5) { ws.adminFails = 0; ws.adminLock = now + 30000; }
       send(ws, { t: 'adminok', ok }); return;
     }
