@@ -20,7 +20,7 @@ const MAX_ITEMS = 220;
 // ---- game tables -------------------------------------------------------------
 const WEAPON = { stick: 15, bat: 30 };                                         // damage per hit
 const SELL = { can: 3, banana: 6, book: 12, duck: 10, gem: 30, trophy: 60, goldbanana: 120, radio: 45 };
-const SELL_WEIGHT = { can: 30, banana: 25, duck: 15, book: 15, gem: 8, trophy: 4, goldbanana: 1, radio: 2 };
+const SELL_WEIGHT = { can: 30, banana: 25, duck: 15, book: 15, gem: 8, trophy: 4, goldbanana: 1, radio: 6 };
 const SHOP_TYPES = ['stick', 'bat', 'flashlight', 'lantern', 'glowstick', 'mirror'];
 const ALLOWED = new Set([...SHOP_TYPES, ...Object.keys(SELL)]);
 const TOGGLE = new Set(['flashlight', 'lantern', 'mirror', 'radio']);
