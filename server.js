@@ -5,6 +5,7 @@ const { WebSocketServer } = require('ws');
 const crypto = require('crypto');
 const PRANK_PASS = process.env.PRANK_PASS || 'iceyistuff1234';   // password for ?prank mode (override with the PRANK_PASS env var)
 const SIGMA_PASS = process.env.SIGMA_PASS || 'iceyistuff';      // password for the ?sigma badge (override with the SIGMA_PASS env var on Render)
+const ADMIN_PASS = process.env.ADMIN_PASS || SIGMA_PASS;         // admin tools use a separate Render secret when configured
 const sha = s => crypto.createHash('sha256').update(String(s)).digest();
 
 const PORT = process.env.PORT || 8080;
@@ -13,6 +14,7 @@ const server = http.createServer((req, res) => { res.writeHead(200, { 'content-t
 const wss = new WebSocketServer({ server, maxPayload: 8192 });
 const state = new Map();           // id -> last valid presence
 const ipCount = new Map();
+const bannedIps = new Set();
 const items = new Map();           // id -> {id,type,x,y,z,yaw,m,h,hd,on,w}
 let itemSeq = 1;
 const MAX_ITEMS = 220;
@@ -91,11 +93,12 @@ function releaseHeld(id, at) {
 
 wss.on('connection', (ws, req) => {
   const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  if (bannedIps.has(ip)) { ws.close(4003, 'Banned by lobby admin'); return; }
   const n = (ipCount.get(ip) || 0) + 1;
   if (wss.clients.size > MAX_CLIENTS || n > MAX_PER_IP) { ws.close(1013); return; }
   ipCount.set(ip, n);
-  ws.id = crypto.randomBytes(6).toString('hex'); ws.alive = true; ws.tokens = 40; ws.lastRefill = Date.now();
-  ws.sigma = false; ws.sigmaFails = 0; ws.prankOk = false; ws.prankFails = 0; ws.prank = false; ws.hp = 100; ws.hitAt = 0; ws.mhitAt = 0; ws.protect = 0;
+  ws.id = crypto.randomBytes(6).toString('hex'); ws.ip = ip; ws.alive = true; ws.tokens = 40; ws.lastRefill = Date.now();
+  ws.sigma = false; ws.sigmaFails = 0; ws.admin = false; ws.adminFails = 0; ws.prankOk = false; ws.prankFails = 0; ws.prank = false; ws.hp = 100; ws.hitAt = 0; ws.mhitAt = 0; ws.protect = 0;
   send(ws, { t: 'hello', id: ws.id, peers: [...state].map(([id, p]) => ({ id, p })), items: [...items.values()].map(itemOut), mons: Object.keys(mons).map(monOut), pranks: [...wss.clients].filter(c => c.prank).map(c => c.id), seeded: [...seeded], lb: topLb() });
   ws.on('pong', () => ws.alive = true);
   ws.on('message', data => {
@@ -109,7 +112,7 @@ wss.on('connection', (ws, req) => {
       send(to, { t: 'rtc', from: ws.id, k: m.k, d: m.d, side: m.side === 'o' ? 'o' : 'i' }); return;
     }
     if (ws.tokens < 1) return; ws.tokens--;                       // rate limit ~25 msgs/s
-    if (m.t === 'p') { const p = clean(m.p); if (!p) return; ws.bag = p.bag; if (p.bd === 'sigma' && !ws.sigma) p.bd = ''; const pm0 = state.get(ws.id); state.set(ws.id, p); broadcast({ t: 's', id: ws.id, p }, ws); if (!pm0 || pm0.m !== p.m) for (const k in mons) electOwner(k); return; }
+    if (m.t === 'p') { const p = clean(m.p); if (!p) return; ws.bag = p.bag; if (p.bd === 'sigma' && !ws.sigma) p.bd = ''; if (p.bd === 'admin' && !ws.admin) p.bd = ''; const pm0 = state.get(ws.id); state.set(ws.id, p); broadcast({ t: 's', id: ws.id, p }, ws); if (!pm0 || pm0.m !== p.m) for (const k in mons) electOwner(k); return; }
     if (m.t === 'chat') {
       const now2 = Date.now(); if (now2 - (ws.lastChat || 0) < 700) return; ws.lastChat = now2;
       const text = String(m.text || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 120); if (!text) return;
@@ -170,6 +173,34 @@ wss.on('connection', (ws, req) => {
       const ok = typeof m.pw === 'string' && m.pw.length < 100 && crypto.timingSafeEqual(sha(m.pw), sha(SIGMA_PASS));
       if (ok) { ws.sigma = true; ws.sigmaFails = 0; } else if (++ws.sigmaFails >= 5) { ws.sigmaFails = 0; ws.sigmaLock = now + 30000; }
       send(ws, { t: 'sigmaok', ok }); return;
+    }
+    if (m.t === 'adminpw') {                                       // server-side admin verification; no client badge flag grants authority
+      if (now < (ws.adminLock || 0)) { send(ws, { t: 'adminok', ok: false, wait: true }); return; }
+      const ok = typeof m.pw === 'string' && m.pw.length < 100 && crypto.timingSafeEqual(sha(m.pw), sha(ADMIN_PASS));
+      if (ok) { ws.admin = true; ws.adminFails = 0; } else if (++ws.adminFails >= 5) { ws.adminFails = 0; ws.adminLock = now + 30000; }
+      send(ws, { t: 'adminok', ok }); return;
+    }
+    if (m.t === 'mod') {
+      if (!ws.admin) return;
+      const action = String(m.action || ''), target = byId(String(m.target || '').slice(0, 24));
+      if (action === 'spawn') {
+        const map = ['m1', 'm2', 'm3'].includes(m.m) ? m.m : '';
+        if (!ALLOWED.has(m.type) || !map || ![m.x, m.y, m.z, m.yaw].every(isNum)) { send(ws, { t: 'modresult', ok: false, message: 'invalid item or location' }); return; }
+        const it = addItem({ type: m.type, x: m.x, y: m.y, z: m.z, yaw: m.yaw, m: map });
+        send(ws, { t: 'modresult', ok: true, message: 'spawned ' + it.type }); return;
+      }
+      if (action === 'kick' || action === 'ban') {
+        if (!target || target === ws) { send(ws, { t: 'modresult', ok: false, message: 'select another online player' }); return; }
+        if (action === 'ban') bannedIps.add(target.ip);
+        target.close(action === 'ban' ? 4003 : 4001, action === 'ban' ? 'Banned by lobby admin' : 'Kicked by lobby admin');
+        send(ws, { t: 'modresult', ok: true, message: action === 'ban' ? 'IP banned until relay restart' : 'player kicked' }); return;
+      }
+      if (action === 'give') {
+        const amount = Number.isSafeInteger(m.amount) && m.amount > 0 && m.amount <= 1000000000 ? m.amount : 0;
+        if (!target || !amount) { send(ws, { t: 'modresult', ok: false, message: 'select a player and a valid coin amount' }); return; }
+        send(target, { t: 'admincoins', amount }); send(ws, { t: 'modresult', ok: true, message: 'sent ' + amount + ' coins' }); return;
+      }
+      send(ws, { t: 'modresult', ok: false, message: 'unknown command' }); return;
     }
     if (m.t === 'prankpw') {                                        // ?prank pass check
       if (now < (ws.prankLock || 0)) { send(ws, { t: 'prankauth', ok: false, wait: true }); return; }
