@@ -34,7 +34,9 @@ const MON_DEF = {
 const MON_RESPAWN_MS = 30000, MON_ATK_CD = 900, MON_REACH = 3.6;
 const mons = {};
 for (const k in MON_DEF) { const d = MON_DEF[k]; mons[k] = { m: k, x: d.home.x, y: d.home.y, z: d.home.z, yaw: 0, st: 0, hp: d.hp, max: d.hp, dead: false, owner: null, atkAt: 0 }; }
-const monOut = k => { const o = mons[k]; return { m: k, x: o.x, y: o.y, z: o.z, yaw: o.yaw, st: o.st, hp: o.hp, max: o.max, dead: o.dead, owner: o.owner }; };
+const lb = new Map();                                              // Mimic kills per player name (resets when the server restarts)
+const topLb = () => [...lb].sort((a, b) => b[1] - a[1]).slice(0, 8);
+const monOut = k => { const o = mons[k]; return { m: k, x: o.x, y: o.y, z: o.z, yaw: o.yaw, st: o.st, hp: o.hp, max: o.max, dead: o.dead, owner: o.owner, dis: o.dis || null }; };
 function electOwner(k) {                                           // one client per map simulates that map's monster
   const mo = mons[k]; let cur = mo.owner ? byId(mo.owner) : null;
   if (cur) { const p = state.get(cur.id); if (!p || p.m !== k) cur = null; }
@@ -93,7 +95,7 @@ wss.on('connection', (ws, req) => {
   ipCount.set(ip, n);
   ws.id = crypto.randomBytes(6).toString('hex'); ws.alive = true; ws.tokens = 40; ws.lastRefill = Date.now();
   ws.sigma = false; ws.sigmaFails = 0; ws.prankOk = false; ws.prankFails = 0; ws.prank = false; ws.hp = 100; ws.hitAt = 0; ws.mhitAt = 0; ws.protect = 0;
-  send(ws, { t: 'hello', id: ws.id, peers: [...state].map(([id, p]) => ({ id, p })), items: [...items.values()].map(itemOut), mons: Object.keys(mons).map(monOut), pranks: [...wss.clients].filter(c => c.prank).map(c => c.id), seeded: [...seeded] });
+  send(ws, { t: 'hello', id: ws.id, peers: [...state].map(([id, p]) => ({ id, p })), items: [...items.values()].map(itemOut), mons: Object.keys(mons).map(monOut), pranks: [...wss.clients].filter(c => c.prank).map(c => c.id), seeded: [...seeded], lb: topLb() });
   ws.on('pong', () => ws.alive = true);
   ws.on('message', data => {
     const now = Date.now(); ws.tokens = Math.min(40, ws.tokens + (now - ws.lastRefill) / 1000 * 25); ws.lastRefill = now;
@@ -123,12 +125,23 @@ wss.on('connection', (ws, req) => {
       const mo = mons[m.m]; if (!mo || mo.owner !== ws.id || mo.dead || !Number.isInteger(m.i) || m.i < 0 || m.i > 31) return;
       if (now - (mo.sayAt || 0) < 1500) return; mo.sayAt = now; broadcast({ t: 'msay', m: m.m, i: m.i }); return;
     }
+    if (m.t === 'mx') {                                             // owner-only monster extras: disguise, fake chat, voice echo, blink
+      const mo = mons[m.m]; if (!mo || mo.m !== 'm2' || mo.owner !== ws.id || mo.dead) return;
+      const k = String(m.k); if (!['dis', 'chat', 'echo', 'tp'].includes(k)) return;
+      mo.mxAt = mo.mxAt || {}; const gap = { dis: 2000, chat: 4000, echo: 8000, tp: 2500 }[k]; if (now - (mo.mxAt[k] || 0) < gap) return; mo.mxAt[k] = now;
+      const nm = v => String(v || '').replace(/[^\w \-.]/g, '').trim().slice(0, 16);
+      if (k === 'dis') { const n = nm(m.n); const h = (typeof m.h === 'string' && /^[a-z0-9_]{1,32}$/.test(m.h)) ? m.h : ''; mo.dis = { n, h }; broadcast({ t: 'mx', m: m.m, k, n, h }); }
+      else if (k === 'chat') { const n = nm(m.n) || 'Player'; const text = String(m.text || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 60); if (!text) return; broadcast({ t: 'mx', m: m.m, k, n, text }); }
+      else if (k === 'echo') broadcast({ t: 'mx', m: m.m, k });
+      else if (k === 'tp') { if (![m.x, m.y, m.z].every(isNum) || inSafe(m.m, m.x, m.z)) return; mo.x = m.x; mo.y = m.y; mo.z = m.z; broadcast({ t: 'mx', m: m.m, k, x: m.x, y: m.y, z: m.z }); }
+      return;
+    }
     if (m.t === 'mattack') {                                        // owner says its monster bit a player; server checks everything
       const mo = mons[m.m]; if (!mo || mo.owner !== ws.id || mo.dead || now - mo.atkAt < MON_ATK_CD) return;
       const v = byId(m.id); if (!v) return; const b = state.get(v.id); if (!b || b.m !== m.m) return;
       if (inSafe(m.m, b.x, b.z) || now < v.protect) return;
       if (Math.hypot(mo.x - b.x, mo.z - b.z) > MON_REACH || Math.abs(mo.y - b.y) > 3) return;
-      mo.atkAt = now; v.hp -= MON_DEF[m.m].dmg;
+      mo.atkAt = now; v.hp -= Math.round(MON_DEF[m.m].dmg * (m.m === 'm2' && mo.hp < mo.max ? 1.6 : 1));   // an angry Mimic hits harder
       broadcast({ t: 'hit', id: v.id, by: 'M' + m.m, hp: Math.max(0, v.hp) });
       if (v.hp <= 0) killPlayer(v, b, 'M' + m.m); else send(v, { t: 'hp', hp: v.hp });
       return;
@@ -140,7 +153,7 @@ wss.on('connection', (ws, req) => {
       if (Math.hypot(a.x - mo.x, a.z - mo.z) > 5 || Math.abs(a.y - mo.y) > 4) return;
       ws.mhitAt = now; mo.hp -= dmg;
       if (mo.hp <= 0) {
-        mo.hp = 0; mo.dead = true; broadcast({ t: 'mdead', m: m.m, by: ws.id }); send(ws, { t: 'mkill', m: m.m, coins: MON_DEF[m.m].coins });
+        mo.hp = 0; mo.dead = true; broadcast({ t: 'mdead', m: m.m, by: ws.id }); if (m.m === 'm2') { const kn = (state.get(ws.id) || {}).n || 'Player'; lb.set(kn, (lb.get(kn) || 0) + 1); if (lb.size > 300) lb.delete([...lb.keys()][0]); broadcast({ t: 'lb', top: topLb() }); } send(ws, { t: 'mkill', m: m.m, coins: MON_DEF[m.m].coins });
         setTimeout(() => { const d = MON_DEF[m.m]; Object.assign(mo, { x: d.home.x, y: d.home.y, z: d.home.z, hp: d.hp, dead: false, st: 0 }); broadcast({ t: 'mresp', m: m.m, x: mo.x, y: mo.y, z: mo.z, hp: mo.hp, max: mo.max }); electOwner(m.m); }, MON_RESPAWN_MS);
       } else broadcast({ t: 'mhp', m: m.m, hp: mo.hp, max: mo.max });
       return;
