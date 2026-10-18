@@ -5,7 +5,6 @@ const { WebSocketServer } = require('ws');
 const crypto = require('crypto');
 const PRANK_PASS = process.env.PRANK_PASS || 'iceyistuff1234';   // password for ?prank mode (override with the PRANK_PASS env var)
 const SIGMA_PASS = process.env.SIGMA_PASS || 'iceyistuff';      // password for the ?sigma badge (override with the SIGMA_PASS env var on Render)
-const ADMIN_PASS = process.env.ADMIN_PASS || 'ice123'; // change with ADMIN_PASS in the relay environment
 const sha = s => crypto.createHash('sha256').update(String(s)).digest();
 
 const PORT = process.env.PORT || 8080;
@@ -98,7 +97,7 @@ wss.on('connection', (ws, req) => {
   if (wss.clients.size > MAX_CLIENTS || n > MAX_PER_IP) { ws.close(1013); return; }
   ipCount.set(ip, n);
   ws.id = crypto.randomBytes(6).toString('hex'); ws.ip = ip; ws.alive = true; ws.tokens = 40; ws.lastRefill = Date.now();
-  ws.sigma = false; ws.sigmaFails = 0; ws.admin = false; ws.adminFails = 0; ws.prankOk = false; ws.prankFails = 0; ws.prank = false; ws.hp = 100; ws.hitAt = 0; ws.mhitAt = 0; ws.protect = 0;
+  ws.sigma = false; ws.sigmaFails = 0; ws.admin = false; ws.prankOk = false; ws.prankFails = 0; ws.prank = false; ws.hp = 100; ws.hitAt = 0; ws.mhitAt = 0; ws.protect = 0;
   send(ws, { t: 'hello', id: ws.id, peers: [...state].map(([id, p]) => ({ id, p })), items: [...items.values()].map(itemOut), mons: Object.keys(mons).map(monOut), pranks: [...wss.clients].filter(c => c.prank).map(c => c.id), seeded: [...seeded], lb: topLb() });
   ws.on('pong', () => ws.alive = true);
   ws.on('message', data => {
@@ -174,12 +173,7 @@ wss.on('connection', (ws, req) => {
       if (ok) { ws.sigma = true; ws.sigmaFails = 0; } else if (++ws.sigmaFails >= 5) { ws.sigmaFails = 0; ws.sigmaLock = now + 30000; }
       send(ws, { t: 'sigmaok', ok }); return;
     }
-    if (m.t === 'adminpw') {                                       // server-side admin verification; no client badge flag grants authority
-      if (now < (ws.adminLock || 0)) { send(ws, { t: 'adminok', ok: false, wait: true }); return; }
-      const ok = !!ADMIN_PASS && typeof m.pw === 'string' && m.pw.length < 100 && crypto.timingSafeEqual(sha(m.pw), sha(ADMIN_PASS));
-      if (ok) { ws.admin = true; ws.adminFails = 0; } else if (++ws.adminFails >= 5) { ws.adminFails = 0; ws.adminLock = now + 30000; }
-      send(ws, { t: 'adminok', ok }); return;
-    }
+    if (m.t === 'adminbadge') { ws.admin = m.enabled === true; return; }
     if (m.t === 'mod') {
       if (!ws.admin) return;
       const action = String(m.action || ''), target = byId(String(m.target || '').slice(0, 24));
