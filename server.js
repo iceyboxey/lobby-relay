@@ -19,11 +19,11 @@ const MAX_ITEMS = 220;
 
 // ---- game tables -------------------------------------------------------------
 const WEAPON = { stick: 15, bat: 30 };                                         // damage per hit
-const SELL = { can: 3, banana: 6, book: 12, duck: 10, gem: 30, trophy: 60, goldbanana: 120 };
-const SELL_WEIGHT = { can: 30, banana: 25, duck: 15, book: 15, gem: 8, trophy: 4, goldbanana: 1 };
-const SHOP_TYPES = ['stick', 'bat', 'flashlight', 'lantern', 'glowstick'];
+const SELL = { can: 3, banana: 6, book: 12, duck: 10, gem: 30, trophy: 60, goldbanana: 120, radio: 45 };
+const SELL_WEIGHT = { can: 30, banana: 25, duck: 15, book: 15, gem: 8, trophy: 4, goldbanana: 1, radio: 2 };
+const SHOP_TYPES = ['stick', 'bat', 'flashlight', 'lantern', 'glowstick', 'mirror'];
 const ALLOWED = new Set([...SHOP_TYPES, ...Object.keys(SELL)]);
-const TOGGLE = new Set(['flashlight', 'lantern']);
+const TOGGLE = new Set(['flashlight', 'lantern', 'mirror', 'radio']);
 const RESPAWN_MS = 90000;
 // ---- safe zones + monsters (v2.0) ---------------------------------------------
 const SAFE = { m1: { x: -901.3, z: 15.5, r: 9 }, m2: { x: -1762.7, z: -1172.3, r: 7 } };
@@ -73,7 +73,7 @@ function addItem(o) {
     if (old === null) old = items.keys().next().value;
     items.delete(old); broadcast({ t: 'idel', id: old });
   }
-  const it = Object.assign({ id: 'i' + (itemSeq++), yaw: 0, m: 'm1', h: null, hd: null, on: true, w: -1 }, o);
+  const it = Object.assign({ id: 'i' + (itemSeq++), yaw: 0, m: 'm1', h: null, hd: null, on: !(o.type === 'radio' || o.type === 'mirror'), w: -1 }, o);
   items.set(it.id, it); broadcast({ t: 'item', it: itemOut(it) }); return it;
 }
 function spawnSlot(i) {
@@ -127,21 +127,27 @@ wss.on('connection', (ws, req) => {
     }
     if (m.t === 'mx') {                                             // owner-only monster extras: disguise, fake chat, voice echo, blink
       const mo = mons[m.m]; if (!mo || mo.m !== 'm2' || mo.owner !== ws.id || mo.dead) return;
-      const k = String(m.k); if (!['dis', 'chat', 'echo', 'tp'].includes(k)) return;
-      mo.mxAt = mo.mxAt || {}; const gap = { dis: 2000, chat: 4000, echo: 8000, tp: 2500 }[k]; if (now - (mo.mxAt[k] || 0) < gap) return; mo.mxAt[k] = now;
+      const k = String(m.k); if (!['dis', 'chat', 'echo', 'tp', 'smash'].includes(k)) return;
+      mo.mxAt = mo.mxAt || {}; const gap = { dis: 2000, chat: 4000, echo: 8000, tp: 2500, smash: 8000 }[k]; if (now - (mo.mxAt[k] || 0) < gap) return; mo.mxAt[k] = now;
       const nm = v => String(v || '').replace(/[^\w \-.]/g, '').trim().slice(0, 16);
       if (k === 'dis') { const n = nm(m.n); const h = (typeof m.h === 'string' && /^[a-z0-9_]{1,32}$/.test(m.h)) ? m.h : ''; mo.dis = { n, h }; broadcast({ t: 'mx', m: m.m, k, n, h }); }
       else if (k === 'chat') { const n = nm(m.n) || 'Player'; const text = String(m.text || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 60); if (!text) return; broadcast({ t: 'mx', m: m.m, k, n, text }); }
-      else if (k === 'echo') broadcast({ t: 'mx', m: m.m, k });
+      else if (k === 'echo' || k === 'smash') broadcast({ t: 'mx', m: m.m, k });
       else if (k === 'tp') { if (![m.x, m.y, m.z].every(isNum) || inSafe(m.m, m.x, m.z)) return; mo.x = m.x; mo.y = m.y; mo.z = m.z; broadcast({ t: 'mx', m: m.m, k, x: m.x, y: m.y, z: m.z }); }
       return;
+    }
+    if (m.t === 'nbhit') {                                          // a nextbot caught you (each player runs their own nextbots; this only damages yourself)
+      if (now - (ws.nbAt || 0) < 900 || now < ws.protect) return; ws.nbAt = now;
+      const a0 = state.get(ws.id); if (!a0 || a0.m !== 'm3') return;
+      ws.hp -= 18; broadcast({ t: 'hit', id: ws.id, by: 'NB', hp: Math.max(0, ws.hp) });
+      if (ws.hp <= 0) killPlayer(ws, a0, 'NB'); else send(ws, { t: 'hp', hp: ws.hp }); return;
     }
     if (m.t === 'mattack') {                                        // owner says its monster bit a player; server checks everything
       const mo = mons[m.m]; if (!mo || mo.owner !== ws.id || mo.dead || now - mo.atkAt < MON_ATK_CD) return;
       const v = byId(m.id); if (!v) return; const b = state.get(v.id); if (!b || b.m !== m.m) return;
       if (inSafe(m.m, b.x, b.z) || now < v.protect) return;
       if (Math.hypot(mo.x - b.x, mo.z - b.z) > MON_REACH || Math.abs(mo.y - b.y) > 3) return;
-      mo.atkAt = now; v.hp -= Math.round(MON_DEF[m.m].dmg * (m.m === 'm2' && mo.hp < mo.max ? 1.6 : 1));   // an angry Mimic hits harder
+      mo.atkAt = now; v.hp = (m.m === 'm2' && mo.hp < mo.max) ? 0 : v.hp - MON_DEF[m.m].dmg;   // an angry Mimic kills in one hit
       broadcast({ t: 'hit', id: v.id, by: 'M' + m.m, hp: Math.max(0, v.hp) });
       if (v.hp <= 0) killPlayer(v, b, 'M' + m.m); else send(v, { t: 'hp', hp: v.hp });
       return;
